@@ -148,7 +148,8 @@ function computeDefaults(
   schema,
   parentDefaults,
   definitions,
-  rawFormData = {}
+  rawFormData = {},
+  includeUndefinedValues = false
 ) {
   const formData = isObject(rawFormData) ? rawFormData : {};
   // Compute the defaults recursively: give highest priority to deepest nodes.
@@ -163,13 +164,31 @@ function computeDefaults(
   } else if ("$ref" in schema) {
     // Use referenced schema defaults for this node.
     const refSchema = findSchemaDefinition(schema.$ref, definitions);
-    return computeDefaults(refSchema, defaults, definitions, formData);
+    return computeDefaults(
+      refSchema,
+      defaults,
+      definitions,
+      formData,
+      includeUndefinedValues
+    );
   } else if ("dependencies" in schema) {
     const resolvedSchema = resolveDependencies(schema, definitions, formData);
-    return computeDefaults(resolvedSchema, defaults, definitions, formData);
+    return computeDefaults(
+      resolvedSchema,
+      defaults,
+      definitions,
+      formData,
+      includeUndefinedValues
+    );
   } else if (isFixedItems(schema)) {
     defaults = schema.items.map(itemSchema =>
-      computeDefaults(itemSchema, undefined, definitions, formData)
+      computeDefaults(
+        itemSchema,
+        undefined,
+        definitions,
+        formData,
+        includeUndefinedValues
+      )
     );
   } else if ("oneOf" in schema) {
     schema =
@@ -190,12 +209,16 @@ function computeDefaults(
       return Object.keys(schema.properties || {}).reduce((acc, key) => {
         // Compute the defaults for this node, with the parent defaults we might
         // have from a previous run: defaults[key].
-        acc[key] = computeDefaults(
+        let computedDefault = computeDefaults(
           schema.properties[key],
           (defaults || {})[key],
           definitions,
-          (formData || {})[key]
+          (formData || {})[key],
+          includeUndefinedValues
         );
+        if (includeUndefinedValues || computedDefault !== undefined) {
+          acc[key] = computedDefault;
+        }
         return acc;
       }, {});
 
@@ -225,7 +248,12 @@ function computeDefaults(
   return defaults;
 }
 
-export function getDefaultFormState(_schema, formData, definitions = {}) {
+export function getDefaultFormState(
+  _schema,
+  formData,
+  definitions = {},
+  includeUndefinedValues = false
+) {
   if (!isObject(_schema)) {
     throw new Error("Invalid schema: " + _schema);
   }
@@ -234,7 +262,8 @@ export function getDefaultFormState(_schema, formData, definitions = {}) {
     schema,
     _schema.default,
     definitions,
-    formData
+    formData,
+    includeUndefinedValues
   );
   if (typeof formData === "undefined") {
     // No form data? Use schema defaults.
@@ -243,6 +272,9 @@ export function getDefaultFormState(_schema, formData, definitions = {}) {
   if (isObject(formData)) {
     // Override schema defaults with form data.
     return mergeObjects(defaults, formData);
+  }
+  if (formData === 0) {
+    return formData;
   }
   return formData || defaults;
 }
@@ -505,21 +537,32 @@ export function stubExistingAdditionalProperties(
     ...schema,
     properties: { ...schema.properties },
   };
+
   Object.keys(formData).forEach(key => {
     if (schema.properties.hasOwnProperty(key)) {
       // No need to stub, our schema already has the property
       return;
     }
-    const additionalProperties = schema.additionalProperties.hasOwnProperty(
-      "type"
-    )
-      ? { ...schema.additionalProperties }
-      : { type: guessType(formData[key]) };
+
+    let additionalProperties;
+    if (schema.additionalProperties.hasOwnProperty("$ref")) {
+      additionalProperties = retrieveSchema(
+        { $ref: schema.additionalProperties["$ref"] },
+        definitions,
+        formData
+      );
+    } else if (schema.additionalProperties.hasOwnProperty("type")) {
+      additionalProperties = { ...schema.additionalProperties };
+    } else {
+      additionalProperties = { type: guessType(formData[key]) };
+    }
+
     // The type of our new key should match the additionalProperties value;
     schema.properties[key] = additionalProperties;
     // Set our additional property flag so we know it was dynamically added
     schema.properties[key][ADDITIONAL_PROPERTY_FLAG] = true;
   });
+
   return schema;
 }
 
@@ -841,43 +884,32 @@ export function toIdSchema(
 
 export function toPathSchema(schema, name = "", definitions, formData = {}) {
   const pathSchema = {
-    $name: name.replace(/\.$/, ""),
+    $name: name.replace(/^\./, ""),
   };
   if ("$ref" in schema || "dependencies" in schema) {
     const _schema = retrieveSchema(schema, definitions, formData);
     return toPathSchema(_schema, name, definitions, formData);
   }
-  if ("items" in schema) {
-    const retVal = {};
-    if (Array.isArray(formData) && formData.length > 0) {
-      formData.forEach((element, index) => {
-        retVal[`${index}`] = toPathSchema(
-          schema.items,
-          `${name}.${index}`,
-          definitions,
-          element
-        );
-      });
+  if (schema.hasOwnProperty("items") && Array.isArray(formData)) {
+    formData.forEach((element, i) => {
+      pathSchema[i] = toPathSchema(
+        schema.items,
+        `${name}.${i}`,
+        definitions,
+        element
+      );
+    });
+  } else if (schema.hasOwnProperty("properties")) {
+    for (const property in schema.properties) {
+      pathSchema[property] = toPathSchema(
+        schema.properties[property],
+        `${name}.${property}`,
+        definitions,
+        // It's possible that formData is not an object -- this can happen if an
+        // array item has just been added, but not populated with data yet
+        (formData || {})[property]
+      );
     }
-    return retVal;
-  }
-  if (schema.type !== "object") {
-    return pathSchema;
-  }
-  for (const property in schema.properties || {}) {
-    const field = schema.properties[property];
-    const fieldId = pathSchema.$name
-      ? pathSchema.$name + "." + property
-      : property;
-
-    pathSchema[property] = toPathSchema(
-      field,
-      fieldId,
-      definitions,
-      // It's possible that formData is not an object -- this can happen if an
-      // array item has just been added, but not populated with data yet
-      (formData || {})[property]
-    );
   }
   return pathSchema;
 }
