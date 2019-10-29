@@ -841,7 +841,7 @@ export function toIdSchema(
 
 export function toPathSchema(schema, name = "", definitions, formData = {}) {
   const pathSchema = {
-    $name: name,
+    $name: name.replace(/\.$/, ""),
   };
   if ("$ref" in schema || "dependencies" in schema) {
     const _schema = retrieveSchema(schema, definitions, formData);
